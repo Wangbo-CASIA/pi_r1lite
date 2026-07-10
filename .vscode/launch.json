@@ -1,0 +1,44 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run R1Lite Policy (Debug)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/r1lite/run_r1lite_openpi_policy_smooth.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--experiment",
+                "r1lite_pack_phone_abs_joint_crop_head_image_0707",
+                "--control-hz",
+                "15",
+                "--actions-per-infer",
+                "10",
+
+                "--chunk-smooth-window",
+                "5",
+                "--joint-ema-alpha",
+                "0.65",
+                "--joint-max-step",
+                "0.053",
+
+                "--gripper-vote-threshold",
+                "50",
+                "--gripper-min-vote-fraction",
+                "0.6",
+
+                "--no-rtc",
+
+                "--execute",
+                "--max-steps",
+                "2000"
+            ],
+            "env": {
+                "HF_LEROBOT_HOME": "/home/robot/wangbo/project/VLA_own/data/r1lite_pack_phone_0707"
+            },
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "justMyCode": false
+        }
+    ]
+}

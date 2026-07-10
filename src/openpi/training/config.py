@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.r1lite_policy as r1lite_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -65,6 +66,8 @@ class AssetsConfig:
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
+    # TODO 需要 额外添加一个参数 root 参数 保证从本地加载训练 local root for LeRobot datasets. If None, LeRobot uses HF_LEROBOT_HOME / repo_id.
+    root: str | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -354,7 +357,47 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
         )
 
+@dataclasses.dataclass(frozen=True)
+class LeRobotR1LiteDataConfig(DataConfigFactory):
+    default_prompt: str | None = None
+    action_space: Literal["joint_delta", "abs_joint", "abs_eef", "delta_eef"] = "joint_delta"
 
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(inputs=[r1lite_policy.R1LiteRepack()])
+    )
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if self.action_space == "joint_delta":
+            policy_inputs = r1lite_policy.R1LiteInputs()
+            policy_outputs = r1lite_policy.R1LiteOutputs()
+        elif self.action_space == "abs_joint":
+            policy_inputs = r1lite_policy.R1LiteInputs()
+            policy_outputs = r1lite_policy.R1LiteOutputs()
+        elif self.action_space == "abs_eef":
+            policy_inputs = r1lite_policy.R1LiteAbsEEFInputs()
+            policy_outputs = r1lite_policy.R1LiteAbsEEFOutputs()
+        elif self.action_space == "delta_eef":
+            policy_inputs = r1lite_policy.R1LiteDeltaEEFInputs()
+            policy_outputs = r1lite_policy.R1LiteDeltaEEFOutputs()
+        else:
+            raise ValueError(f"Unsupported R1Lite action_space: {self.action_space}")
+
+        data_transforms = _transforms.Group(
+            inputs=[policy_inputs],
+            outputs=[policy_outputs],
+        )
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+    
 @dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
@@ -561,6 +604,72 @@ _CONFIGS = [
     #
     # Inference Aloha configs.
     #
+    TrainConfig(
+        name="pi05_r1lite_pack_phone_new_state_abs_joint_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotR1LiteDataConfig(
+            repo_id="r1lite_pack_phone_new_abs_joint",
+            default_prompt="",
+            action_space="abs_joint", # 决定了模型输入的格式
+            base_config=DataConfig(
+                root="/home/robot/wangbo/project/VLA-RL/conrft-r1lite/data/lerobot_openpi/r1lite_pack_phone_new_abs_joint",
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=15_000,
+        batch_size=16,
+        save_interval=1000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+
+    TrainConfig(
+        name="r1lite_pack_phone_abs_joint_crop_head_image_0707",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=50,
+            discrete_state_input=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotR1LiteDataConfig(
+            repo_id="r1lite_pack_phone_abs_joint_crop_head_image_0707",
+            default_prompt="",
+            action_space="abs_joint", # 决定了模型输入的格式
+            action_sequence_keys=("action.qpos",),
+            base_config=DataConfig(
+                root="/home/robot/wangbo/project/VLA_own/data/r1lite_pack_phone_0707/pack_up_a_smart_phone/",
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=16,
+        num_workers=16,
+        save_interval=1000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=50,
+            discrete_state_input=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+
     TrainConfig(
         name="pi0_aloha",
         model=pi0_config.Pi0Config(),

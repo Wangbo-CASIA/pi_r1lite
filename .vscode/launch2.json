@@ -1,0 +1,21 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Compute Norm Stats",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/compute_norm_stats.py",
+            "console": "integratedTerminal",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "args": [
+                "--config-name",
+                "r1lite_pack_phone_abs_joint_crop_head_image_0707"
+            ],
+            "env": {
+                "HF_LEROBOT_HOME": "/home/robot/wangbo/project/VLA_own/data/r1lite_pack_phone_0707"
+            },
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

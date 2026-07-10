@@ -1,0 +1,65 @@
+# ALOE online replay and RL configuration for the new R1Lite phone assembly dataset with pi0.5 state tokens enabled.
+
+experiment: r1lite_pack_phone_new_state
+action_space: joint_delta
+actor_train_config: pi05_r1lite_pack_phone_new_state_joint_lora
+
+replay:
+  root: data/aloe/r1lite_pack_phone_new_state
+  import_success_demos_as: human_demo
+
+collector:
+  policy_host: localhost
+  policy_port: 8000
+  failure_key: f
+  success_key: s
+  abort_key: q
+  save_correction_key: ENTER
+  discard_correction_key: ESC
+  teleop_source: tabletop  # choices: spacemouse, tabletop
+  takeover_http_path: /takeover/set_active
+  takeover_switch_delay_sec: 0.5
+  tabletop_release_key: ENTER
+  operator_event_host: 0.0.0.0
+  operator_event_port: 18001
+  operator_event_path: /teleop/operator_event
+  teleop_idle_seconds: 1.0
+  control_hz: 10.0
+  actions_per_infer: 5
+  max_steps: 3000
+
+reward:
+  intermediate: -1.0
+  success_terminal: 0.0
+  cfail: null  # null means use max_steps for online collection and average terminal segment length for offline relabeling.
+
+critic:
+  action_horizon: 10
+  pi05_base_checkpoint: "gs://openpi-assets/checkpoints/pi05_base/params"  # Base pi0.5 checkpoint used only for the frozen SigLIP visual encoder.
+  vision_mode: openpi_pi05_siglip
+  gamma: 0.99
+  polyak: 0.005
+  ensemble: 5
+  embed_dim: 256
+  layers: 6
+  heads: 8
+  batch_size: 64
+  lr: 0.00003
+  steps_per_iteration: 1000
+
+actor:
+  action_horizon: 10
+  batch_size: 32
+  beta: 1.0
+  adv_clip: 5.0
+  steps_per_iteration: 1000
+  lr: 0.00003
+
+iteration:
+  output_root: runs/aloe
+  initial_actor_checkpoint: checkpoints/pi05_r1lite_pack_phone_new_state_joint_lora/r1lite_pack_phone_new_state/14999
+  target_successes_per_iteration: 50
+
+eval:
+  episodes: 20
+  max_steps: 2000
