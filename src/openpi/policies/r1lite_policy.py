@@ -168,14 +168,16 @@ class R1LiteInputs(transforms.DataTransformFn):
     EXPECTED_CAMERAS: ClassVar[tuple[str, ...]] = ("head", "left_wrist", "right_wrist")
 
     def __call__(self, data: dict) -> dict:
-        images = data["images"]
-        extra_cameras = set(images) - set(self.EXPECTED_CAMERAS)
-        if extra_cameras:
-            raise ValueError(f"Unexpected R1Lite image keys: {sorted(extra_cameras)}")
+        # images = data["images"]
+        # extra_cameras = set(images) - set(self.EXPECTED_CAMERAS)
+        # if extra_cameras:
+        #     raise ValueError(f"Unexpected R1Lite image keys: {sorted(extra_cameras)}")
 
-        base_image = _parse_image(images["head"])
-        left_wrist = _parse_image(images["left_wrist"])
-        right_wrist = _parse_image(images["right_wrist"])
+        # base_image = _parse_image(images["head"])
+        # left_wrist = _parse_image(images["left_wrist"])
+        # right_wrist = _parse_image(images["right_wrist"])
+
+        base_image, left_wrist, right_wrist, _ = _abs_eef_images(data["images"])
         
         inputs = {
             "state": _compact_joint_state(data["state"]),

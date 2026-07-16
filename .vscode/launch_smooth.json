@@ -2,50 +2,32 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Run R1Lite Async Timestamp Policy (Debug)",
+            "name": "Run R1Lite Policy (Debug)",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/examples/r1lite/run_r1lite_openpi_policy_async.py",
+            "program": "${workspaceFolder}/examples/r1lite/run_r1lite_openpi_policy_smooth.py",
             "console": "integratedTerminal",
             "args": [
                 "--experiment",
                 "r1lite_pack_phone_abs_joint_crop_head_image_0707",
-
-                "--action-space",
-                "abs_joint",
-
                 "--control-hz",
                 "15",
-
                 "--actions-per-infer",
-                "50",
+                "10",
 
-                "--plan-blend-steps",
-                "2",
-
-                "--max-hold-steps",
-                "4",
-
-                "--latency-ema-alpha",
-                "0.2",
+                "--chunk-smooth-window",
+                "5",
+                "--joint-ema-alpha",
+                "0.65",
+                "--joint-max-step",
+                "0.053",
 
                 "--gripper-vote-threshold",
                 "50",
-
                 "--gripper-min-vote-fraction",
                 "0.6",
 
-                "--right-soft-close-value",
-                "90",
-
-                "--timeout",
-                "2.0",
-
-                "--log-every-infers",
-                "10",
-
-                "--log-every-steps",
-                "15",
+                "--no-rtc",
 
                 "--execute",
                 "--max-steps",
