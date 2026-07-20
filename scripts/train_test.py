@@ -2,13 +2,28 @@ import dataclasses
 import os
 import pathlib
 
-import pytest
-
 os.environ["JAX_PLATFORMS"] = "cpu"
+
+import jax.numpy as jnp
+import pytest
 
 from openpi.training import config as _config
 
 from . import train
+
+
+def test_reduce_chunked_loss_without_mask():
+    loss = jnp.asarray([[1.0, 3.0], [5.0, 7.0]])
+
+    assert train._reduce_chunked_loss(loss, None) == pytest.approx(4.0)  # noqa: SLF001
+
+
+def test_reduce_chunked_loss_normalizes_each_sample_mask():
+    loss = jnp.asarray([[1.0, 3.0, 100.0], [2.0, 4.0, 6.0]])
+    mask = jnp.asarray([[True, True, False], [True, False, False]])
+
+    # First sample: (1 + 3) / 2 = 2. Second sample: 2 / 1 = 2.
+    assert train._reduce_chunked_loss(loss, mask) == pytest.approx(2.0)  # noqa: SLF001
 
 
 @pytest.mark.parametrize("config_name", ["debug"])

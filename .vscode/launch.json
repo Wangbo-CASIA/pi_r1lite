@@ -1,58 +1,40 @@
 {
     "version": "0.2.0",
     "configurations": [
+        // {
+        //     "name": "Train R1Lite Model",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "${workspaceFolder}/scripts/train.py",
+        //     "console": "integratedTerminal",
+        //     "args": [
+        //         "r1lite_pack_phone_abs_joint_crop_head_image_0707", // 实验名称
+        //         "--exp-name",
+        //         "r1lite_pack_phone_new_state2", // 保存位置
+        //         // "--overwrite"
+        //     ],
+        //     "env": {
+        //         "HF_LEROBOT_HOME": "/home/robot/wangbo/project/VLA_own/data/r1lite_pack_phone_0707",
+        //         //"HF_LEROBOT_HOME": "/home/robot/wangbo/project/VLA-RL/conrft-r1lite/data/lerobot_openpi",
+        //         "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.9"
+        //     },
+        //     "cwd": "${workspaceFolder}",
+        //     "python": "${workspaceFolder}/.venv/bin/python",
+        //     "justMyCode": false
+        // },
         {
-            "name": "Run R1Lite Async Timestamp Policy (Debug)",
+            "name": "Train R1Lite DAgger Model",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/examples/r1lite/run_r1lite_openpi_policy_async.py",
+            "program": "${workspaceFolder}/scripts/train.py",
             "console": "integratedTerminal",
             "args": [
-                "--experiment",
-                "r1lite_pack_phone_abs_joint_crop_head_image_0707",
-
-                "--action-space",
-                "abs_joint",
-
-                "--control-hz",
-                "15",
-
-                "--actions-per-infer",
-                "50",
-
-                "--plan-blend-steps",
-                "2",
-
-                "--max-hold-steps",
-                "4",
-
-                "--latency-ema-alpha",
-                "0.2",
-
-                "--gripper-vote-threshold",
-                "50",
-
-                "--gripper-min-vote-fraction",
-                "0.6",
-
-                "--right-soft-close-value",
-                "90",
-
-                "--timeout",
-                "2.0",
-
-                "--log-every-infers",
-                "10",
-
-                "--log-every-steps",
-                "15",
-
-                "--execute",
-                "--max-steps",
-                "2000"
+                "r1lite_pack_phone_abs_joint_crop_head_image_dager",
+                "--exp-name",
+                "r1lite_pack_phone_dagger_it1"
             ],
             "env": {
-                "HF_LEROBOT_HOME": "/home/robot/wangbo/project/VLA_own/data/r1lite_pack_phone_0707"
+                "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.9"
             },
             "cwd": "${workspaceFolder}",
             "python": "${workspaceFolder}/.venv/bin/python",

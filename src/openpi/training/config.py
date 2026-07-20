@@ -63,6 +63,20 @@ class AssetsConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotDatasetConfig:
+    """One LeRobot dataset participating in a weighted training mixture."""
+
+    repo_id: str
+    root: str | None = None
+    weight: float = 1.0
+    action_sequence_keys: Sequence[str] = ("actions",)
+    # Optional episodes.jsonl containing intervention_ranges. When set, only
+    # intervention frames are exposed as sample starts and only action targets
+    # inside the same intervention segment contribute to the training loss.
+    intervention_ranges_path: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
@@ -92,6 +106,11 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+
+    # Optional weighted mixture of LeRobot datasets. When empty, repo_id/root above
+    # retain the original single-dataset behavior. A dataset is sampled according
+    # to its weight, independently of its number of frames.
+    lerobot_datasets: Sequence[LeRobotDatasetConfig] = ()
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -357,6 +376,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
         )
 
+
 @dataclasses.dataclass(frozen=True)
 class LeRobotR1LiteDataConfig(DataConfigFactory):
     default_prompt: str | None = None
@@ -369,10 +389,7 @@ class LeRobotR1LiteDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        if self.action_space == "joint_delta":
-            policy_inputs = r1lite_policy.R1LiteInputs()
-            policy_outputs = r1lite_policy.R1LiteOutputs()
-        elif self.action_space == "abs_joint":
+        if self.action_space in ("joint_delta", "abs_joint"):
             policy_inputs = r1lite_policy.R1LiteInputs()
             policy_outputs = r1lite_policy.R1LiteOutputs()
         elif self.action_space == "abs_eef":
@@ -397,7 +414,8 @@ class LeRobotR1LiteDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
         )
-    
+
+
 @dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
@@ -616,7 +634,7 @@ _CONFIGS = [
         data=LeRobotR1LiteDataConfig(
             repo_id="r1lite_pack_phone_new_abs_joint",
             default_prompt="",
-            action_space="abs_joint", # 决定了模型输入的格式
+            action_space="abs_joint",  # 决定了模型输入的格式
             base_config=DataConfig(
                 root="/home/robot/wangbo/project/VLA-RL/conrft-r1lite/data/lerobot_openpi/r1lite_pack_phone_new_abs_joint",
                 prompt_from_task=True,
@@ -635,7 +653,6 @@ _CONFIGS = [
         ).get_freeze_filter(),
         ema_decay=None,
     ),
-
     TrainConfig(
         name="r1lite_pack_phone_abs_joint_crop_head_image_0707",
         model=pi0_config.Pi0Config(
@@ -648,7 +665,7 @@ _CONFIGS = [
         data=LeRobotR1LiteDataConfig(
             repo_id="r1lite_pack_phone_abs_joint_crop_head_image_0707",
             default_prompt="",
-            action_space="abs_joint", # 决定了模型输入的格式
+            action_space="abs_joint",  # 决定了模型输入的格式
             action_sequence_keys=("action.qpos",),
             base_config=DataConfig(
                 root="/home/robot/wangbo/project/VLA_own/data/r1lite_pack_phone_0707/pack_up_a_smart_phone/",
@@ -669,7 +686,66 @@ _CONFIGS = [
         ).get_freeze_filter(),
         ema_decay=None,
     ),
-
+    TrainConfig(
+        name="r1lite_pack_phone_abs_joint_crop_head_image_dager",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=50,
+            discrete_state_input=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotR1LiteDataConfig(
+            # This ID selects the SFT normalization stats below. Actual samples
+            # come from lerobot_datasets, with equal source probabilities.
+            repo_id="r1lite_pack_phone_abs_joint_crop_head_image_0707",
+            default_prompt="",
+            action_space="abs_joint",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                lerobot_datasets=(
+                    LeRobotDatasetConfig(
+                        repo_id="r1lite-pack-phone-dagger-it1-0717",
+                        root="/home/robot/wangbo/project/VLA_own/data/r1lite-pack-phone-dagger-it1-0717",
+                        weight=0.5,
+                        action_sequence_keys=("action",),
+                        intervention_ranges_path=(
+                            "/home/robot/wangbo/project/VLA_own/data/r1lite-pack-phone-dagger-it1-0717/"
+                            "meta/episodes.jsonl"
+                        ),
+                    ),
+                    LeRobotDatasetConfig(
+                        repo_id="r1lite_pack_phone_abs_joint_crop_head_image_0707",
+                        root=("/home/robot/wangbo/project/VLA_own/data/r1lite_pack_phone_0707/pack_up_a_smart_phone"),
+                        weight=0.5,
+                        action_sequence_keys=("action.qpos",),
+                    ),
+                ),
+            ),
+            assets=AssetsConfig(
+                assets_dir=(
+                    "./checkpoints/r1lite_pack_phone_abs_joint_crop_head_image_0707/"
+                    "r1lite_pack_phone_new_state1/14999/assets"
+                ),
+                asset_id="r1lite_pack_phone_abs_joint_crop_head_image_0707",
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "./checkpoints/r1lite_pack_phone_abs_joint_crop_head_image_0707/r1lite_pack_phone_new_state1/14999/params"
+        ),
+        num_train_steps=30_000,
+        batch_size=16,
+        num_workers=16,
+        save_interval=1000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=50,
+            discrete_state_input=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
     TrainConfig(
         name="pi0_aloha",
         model=pi0_config.Pi0Config(),

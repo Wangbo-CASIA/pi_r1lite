@@ -9,6 +9,19 @@ from openpi.shared import download
 from openpi.shared import nnx_utils
 
 
+def test_observation_preserves_action_loss_mask():
+    config = pi0_config.Pi0Config()
+    observation = config.fake_obs(batch_size=2)
+    data = observation.to_dict()
+    data["action_loss_mask"] = jax.numpy.ones((2, config.action_horizon), dtype=bool)
+
+    parsed = _model.Observation.from_dict(data)
+    processed = _model.preprocess_observation(None, parsed, train=False)
+
+    assert processed.action_loss_mask.shape == (2, config.action_horizon)
+    assert processed.action_loss_mask.all()
+
+
 def test_pi0_model():
     key = jax.random.key(0)
     config = pi0_config.Pi0Config()

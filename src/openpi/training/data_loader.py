@@ -1,7 +1,9 @@
 from collections.abc import Iterator, Sequence
+import json
 import logging
 import multiprocessing
 import os
+import pathlib
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 
@@ -60,6 +62,115 @@ class TransformedDataset(Dataset[T_co]):
 
     def __len__(self) -> int:
         return len(self._dataset)
+
+
+class ActionLossMaskDataset(Dataset[dict]):
+    """Adds an action loss mask while retaining the full underlying episodes."""
+
+    def __init__(
+        self,
+        dataset: Dataset[dict],
+        action_horizon: int,
+        intervention_ranges_path: str | None = None,
+    ):
+        self._dataset = dataset
+        self._action_horizon = action_horizon
+        self._samples = self._load_intervention_samples(intervention_ranges_path)
+
+    def _load_intervention_samples(self, intervention_ranges_path: str | None) -> list[tuple[int, int]] | None:
+        if intervention_ranges_path is None:
+            return None
+
+        metadata_path = pathlib.Path(intervention_ranges_path)
+        if not metadata_path.is_file():
+            raise FileNotFoundError(f"Intervention metadata not found: {metadata_path}")
+
+        with metadata_path.open() as f:
+            episodes = [json.loads(line) for line in f if line.strip()]
+        episodes.sort(key=lambda episode: episode["episode_index"])
+
+        samples: list[tuple[int, int]] = []
+        dataset_offset = 0
+        for expected_episode_index, episode in enumerate(episodes):
+            episode_index = int(episode["episode_index"])
+            if episode_index != expected_episode_index:
+                raise ValueError(
+                    "Intervention metadata must contain contiguous episode indices starting at 0; "
+                    f"expected {expected_episode_index}, got {episode_index}."
+                )
+
+            episode_length = int(episode["length"])
+            previous_end = -1
+            for intervention_range in episode.get("intervention_ranges", ()):
+                start_frame = int(intervention_range["start_frame"])
+                end_frame = int(intervention_range["end_frame"])
+                if not 0 <= start_frame <= end_frame < episode_length:
+                    raise ValueError(
+                        f"Invalid intervention range [{start_frame}, {end_frame}] "
+                        f"for episode {episode_index} with length {episode_length}."
+                    )
+                if start_frame <= previous_end:
+                    raise ValueError(f"Overlapping intervention ranges in episode {episode_index} are not supported.")
+
+                samples.extend(
+                    (dataset_offset + frame_index, end_frame - frame_index + 1)
+                    for frame_index in range(start_frame, end_frame + 1)
+                )
+                previous_end = end_frame
+
+            dataset_offset += episode_length
+
+        if dataset_offset != len(self._dataset):
+            raise ValueError(
+                f"Intervention metadata describes {dataset_offset} frames, "
+                f"but the LeRobot dataset contains {len(self._dataset)} frames."
+            )
+        if not samples:
+            raise ValueError(f"No intervention frames found in {metadata_path}.")
+        return samples
+
+    def __getitem__(self, index: SupportsIndex) -> dict:
+        item_index = index.__index__()
+        if self._samples is None:
+            dataset_index = item_index
+            valid_steps = self._action_horizon
+        else:
+            dataset_index, remaining_intervention_steps = self._samples[item_index]
+            valid_steps = min(self._action_horizon, remaining_intervention_steps)
+
+        sample = dict(self._dataset[dataset_index])
+        sample["action_loss_mask"] = np.arange(self._action_horizon) < valid_steps
+        return sample
+
+    def __len__(self) -> int:
+        return len(self._dataset) if self._samples is None else len(self._samples)
+
+
+class WeightedConcatDataset(torch.utils.data.ConcatDataset):
+    """Concatenated datasets carrying source-level sampling weights."""
+
+    def __init__(self, datasets: Sequence[Dataset], weights: Sequence[float]):
+        if len(datasets) != len(weights):
+            raise ValueError("Each LeRobot dataset must have exactly one sampling weight.")
+        if not datasets:
+            raise ValueError("At least one LeRobot dataset is required for a mixture.")
+        if any(weight <= 0 for weight in weights):
+            raise ValueError("LeRobot dataset sampling weights must all be positive.")
+
+        super().__init__(typing.cast(Sequence[torch.utils.data.Dataset], datasets))
+        if any(len(dataset) == 0 for dataset in self.datasets):
+            raise ValueError("LeRobot datasets in a mixture must not be empty.")
+        total_weight = sum(weights)
+        self.source_weights = tuple(weight / total_weight for weight in weights)
+
+    def item_sampling_weights(self) -> torch.Tensor:
+        """Return per-item weights whose mass equals each source's weight."""
+        return torch.cat(
+            [
+                torch.full((len(dataset),), source_weight / len(dataset), dtype=torch.double)
+                for dataset, source_weight in zip(self.datasets, self.source_weights, strict=True)
+            ]
+        )
 
 
 class IterableTransformedDataset(IterableDataset[T_co]):
@@ -137,19 +248,38 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.root)
-    dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
-        root=data_config.root,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
+    def create_single_dataset(spec: _config.LeRobotDatasetConfig, *, add_action_loss_mask: bool) -> Dataset:
+        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(spec.repo_id, root=spec.root)
+        dataset = lerobot_dataset.LeRobotDataset(
+            spec.repo_id,
+            root=spec.root,
+            delta_timestamps={
+                key: [t / dataset_meta.fps for t in range(action_horizon)] for key in spec.action_sequence_keys
+            },
+        )
+
+        if add_action_loss_mask:
+            dataset = ActionLossMaskDataset(dataset, action_horizon, spec.intervention_ranges_path)
+        if data_config.prompt_from_task:
+            dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+        return dataset
+
+    if data_config.lerobot_datasets:
+        add_action_loss_mask = any(spec.intervention_ranges_path is not None for spec in data_config.lerobot_datasets)
+        datasets = [
+            create_single_dataset(spec, add_action_loss_mask=add_action_loss_mask)
+            for spec in data_config.lerobot_datasets
+        ]
+        return WeightedConcatDataset(datasets, [spec.weight for spec in data_config.lerobot_datasets])
+
+    return create_single_dataset(
+        _config.LeRobotDatasetConfig(
+            repo_id=data_config.repo_id,
+            root=data_config.root,
+            action_sequence_keys=data_config.action_sequence_keys,
+        ),
+        add_action_loss_mask=False,
     )
-
-    if data_config.prompt_from_task:
-        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
-
-    return dataset
 
 
 def create_rlds_dataset(
@@ -301,14 +431,26 @@ def create_torch_data_loader(
         seed: The seed to use for shuffling the data.
     """
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
+    mixture = dataset if isinstance(dataset, WeightedConcatDataset) else None
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     # Use TorchDataLoader for both frameworks
     # For PyTorch DDP, create DistributedSampler and divide batch size by world size
     # For JAX, divide by process count
     sampler = None
+    if mixture is not None:
+        sampler = torch.utils.data.WeightedRandomSampler(
+            mixture.item_sampling_weights(),
+            num_samples=len(mixture),
+            replacement=True,
+            generator=torch.Generator().manual_seed(seed),
+        )
+        logging.info(f"Using weighted LeRobot mixture with source probabilities {mixture.source_weights}")
+
     if framework == "pytorch":
         if torch.distributed.is_initialized():
+            if sampler is not None:
+                raise NotImplementedError("Weighted LeRobot mixtures are not supported with PyTorch DDP.")
             sampler = torch.utils.data.distributed.DistributedSampler(
                 dataset,
                 num_replicas=torch.distributed.get_world_size(),

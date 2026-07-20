@@ -15,7 +15,7 @@ class R1LiteRepack(transforms.DataTransformFn):
         flat = transforms.flatten_dict(data)
         images = data.get("images")
         if images is None:
-            if "observation.images.cam_high" in flat.keys():
+            if "observation.images.cam_high" in flat:
                 images = {
                     "head": flat["observation.images.cam_high"],
                     "left_wrist": flat["observation.images.cam_left_wrist"],
@@ -48,6 +48,8 @@ class R1LiteRepack(transforms.DataTransformFn):
             result["prompt"] = data["prompt"]
         elif "prompt" in flat:
             result["prompt"] = flat["prompt"]
+        if "action_loss_mask" in data:
+            result["action_loss_mask"] = data["action_loss_mask"]
         return result
 
 
@@ -66,18 +68,17 @@ def _compact_joint_state(state: np.ndarray) -> np.ndarray:
     #     raise ValueError(f"Expected R1Lite state with 53 dims, got shape {state.shape}")
     if state.shape[-1] == 53:
         return np.concatenate(
-        [
-            state[..., 13:19],
-            state[..., 25:26],
-            state[..., 39:45],
-            state[..., 51:52],
-        ],
-        axis=-1,
-    ).astype(np.float32)
-    elif state.shape[-1] == 14:
+            [
+                state[..., 13:19],
+                state[..., 25:26],
+                state[..., 39:45],
+                state[..., 51:52],
+            ],
+            axis=-1,
+        ).astype(np.float32)
+    if state.shape[-1] == 14:
         return state
-    else:
-        raise ValueError(f"Expected R1Lite state with 53 dims, got shape {state.shape}")
+    raise ValueError(f"Expected R1Lite state with 53 dims, got shape {state.shape}")
 
 
 def _compact_abs_eef_state(state: np.ndarray) -> np.ndarray:
@@ -178,7 +179,7 @@ class R1LiteInputs(transforms.DataTransformFn):
         # right_wrist = _parse_image(images["right_wrist"])
 
         base_image, left_wrist, right_wrist, _ = _abs_eef_images(data["images"])
-        
+
         inputs = {
             "state": _compact_joint_state(data["state"]),
             "image": {

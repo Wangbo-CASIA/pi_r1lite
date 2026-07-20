@@ -6,7 +6,6 @@ from typing import Any
 
 import etils.epath as epath
 import flax.nnx as nnx
-from flax.training import common_utils
 import flax.traverse_util as traverse_util
 import jax
 import jax.experimental
@@ -133,6 +132,19 @@ def init_train_state(
     return train_state, state_sharding
 
 
+def _reduce_chunked_loss(chunked_loss: at.Array, action_loss_mask: at.Array | None) -> at.Array:
+    if action_loss_mask is None:
+        return jnp.mean(chunked_loss)
+    if chunked_loss.shape != action_loss_mask.shape:
+        raise ValueError(
+            f"Action loss mask shape {action_loss_mask.shape} does not match loss shape {chunked_loss.shape}."
+        )
+
+    mask = action_loss_mask.astype(chunked_loss.dtype)
+    loss_per_sample = jnp.sum(chunked_loss * mask, axis=-1) / jnp.maximum(jnp.sum(mask, axis=-1), 1.0)
+    return jnp.mean(loss_per_sample)
+
+
 @at.typecheck
 def train_step(
     config: _config.TrainConfig,
@@ -148,7 +160,7 @@ def train_step(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
         chunked_loss = model.compute_loss(rng, observation, actions, train=True)
-        return jnp.mean(chunked_loss)
+        return _reduce_chunked_loss(chunked_loss, observation.action_loss_mask)
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
