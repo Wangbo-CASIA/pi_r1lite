@@ -70,10 +70,13 @@ class LeRobotDatasetConfig:
     root: str | None = None
     weight: float = 1.0
     action_sequence_keys: Sequence[str] = ("actions",)
+    sample_mode: Literal["all", "intervention", "valid_non_intervention"] = "all"
     # Optional episodes.jsonl containing intervention_ranges. When set, only
-    # intervention frames are exposed as sample starts and only action targets
-    # inside the same intervention segment contribute to the training loss.
+    # frames selected by sample_mode are exposed as sample starts.
     intervention_ranges_path: str | None = None
+    # For valid_non_intervention samples, actions in this window immediately
+    # before every intervention are masked from the loss.
+    pre_intervention_seconds: float = 2.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -696,8 +699,9 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",
         ),
         data=LeRobotR1LiteDataConfig(
-            # This ID selects the SFT normalization stats below. Actual samples
-            # come from lerobot_datasets, with equal source probabilities.
+            # Actual samples come from the three weighted sources below. Their
+            # normalization stats are computed from every raw frame in the SFT
+            # and both DAgger datasets and loaded via the assets override below.
             repo_id="r1lite_pack_phone_abs_joint_crop_head_image_0707",
             default_prompt="",
             action_space="abs_joint",
@@ -705,33 +709,42 @@ _CONFIGS = [
                 prompt_from_task=True,
                 lerobot_datasets=(
                     LeRobotDatasetConfig(
+                        repo_id="r1lite_pack_phone_abs_joint_crop_head_image_0707",
+                        root=("/home/robot/wangbo/project/VLA_own/data/r1lite_pack_phone_0707/pack_up_a_smart_phone"),
+                        weight=0.50,
+                        action_sequence_keys=("action.qpos",),
+                    ),
+                    LeRobotDatasetConfig(
                         repo_id="r1lite-pack-phone-dagger-it1-0717",
                         root="/home/robot/wangbo/project/VLA_own/data/r1lite-pack-phone-dagger-it1-0717",
-                        weight=0.5,
+                        weight=0.25,
                         action_sequence_keys=("action",),
+                        sample_mode="intervention",
                         intervention_ranges_path=(
                             "/home/robot/wangbo/project/VLA_own/data/r1lite-pack-phone-dagger-it1-0717/"
                             "meta/episodes.jsonl"
                         ),
                     ),
                     LeRobotDatasetConfig(
-                        repo_id="r1lite_pack_phone_abs_joint_crop_head_image_0707",
-                        root=("/home/robot/wangbo/project/VLA_own/data/r1lite_pack_phone_0707/pack_up_a_smart_phone"),
-                        weight=0.5,
+                        repo_id="r1lite-pack-phone-dagger-it2-0721",
+                        root="/home/robot/wangbo/project/VLA_own/data/r1lite-pack-phone-dagger-it2-0721",
+                        weight=0.25,
                         action_sequence_keys=("action.qpos",),
+                        sample_mode="intervention",
+                        intervention_ranges_path=(
+                            "/home/robot/wangbo/project/VLA_own/data/r1lite-pack-phone-dagger-it2-0721/"
+                            "meta/episodes.jsonl"
+                        ),
                     ),
                 ),
             ),
             assets=AssetsConfig(
-                assets_dir=(
-                    "./checkpoints/r1lite_pack_phone_abs_joint_crop_head_image_0707/"
-                    "r1lite_pack_phone_new_state1/14999/assets"
-                ),
-                asset_id="r1lite_pack_phone_abs_joint_crop_head_image_0707",
+                assets_dir="./assets/r1lite_pack_phone_abs_joint_crop_head_image_dager",
+                asset_id="r1lite_pack_phone_abs_joint_crop_head_image_dager",
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "./checkpoints/r1lite_pack_phone_abs_joint_crop_head_image_0707/r1lite_pack_phone_new_state1/14999/params"
+            "./checkpoints/r1lite_pack_phone_abs_joint_crop_head_image_dager/r1lite_pack_phone_dagger_it1/26000/params"
         ),
         num_train_steps=30_000,
         batch_size=16,

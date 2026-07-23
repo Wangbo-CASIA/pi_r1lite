@@ -26,7 +26,7 @@ import sys
 import tempfile
 from typing import Any
 
-DEFAULT_DATASET_ROOT = Path("/home/robot/wangbo/project/VLA_own/data/r1lite-pack-phone-dagger-it1-0717")
+DEFAULT_DATASET_ROOT = Path("/home/robot/wangbo/project/VLA_own/data/r1lite-pack-phone-dagger-it2-0721/")
 SOURCE_CAMERA_RELATIVE_DIR = Path("videos/chunk-000/observation.images.cam_high")
 OUTPUT_CAMERA_RELATIVE_DIR = Path("videos/chunk-000/observation.images.cam_high_crop")
 

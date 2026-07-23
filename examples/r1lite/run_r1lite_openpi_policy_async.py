@@ -19,6 +19,7 @@ require the RTC policy client or ROS topics used by the reference async scripts.
 from __future__ import annotations
 
 import argparse
+import collections
 import concurrent.futures
 import dataclasses
 import queue
@@ -31,7 +32,6 @@ import run_r1lite_openpi_policy_smooth as base
 
 MODEL_ACTION_HZ = 15.0
 MODEL_ACTION_DT = 1.0 / MODEL_ACTION_HZ
-GRIPPER_VOTE_ACTIONS = 10
 JOINT_INDICES = np.r_[0:6, 7:13]
 
 
@@ -47,6 +47,7 @@ class InferenceResult:
     end_to_end_latency: float
     actions: np.ndarray
     action_times: np.ndarray
+    reference_joints: np.ndarray
 
 
 @dataclasses.dataclass(frozen=True)
@@ -71,6 +72,8 @@ class InterpolatedAction:
     alpha: float
     before_start: bool
     after_end: bool
+    ensemble_chunks: int
+    rejected_chunks: int
 
 
 def interp_linear(q0: np.ndarray, q1: np.ndarray, t0: float, t1: float, t: float) -> np.ndarray:
@@ -95,6 +98,9 @@ class LatestTimedActionPlan:
         self._request_id: int | None = None
         self._actions: np.ndarray | None = None
         self._action_times: np.ndarray | None = None
+        self._history: collections.deque[tuple[np.ndarray, np.ndarray]] = collections.deque(
+            maxlen=int(args.temporal_ensemble_chunks)
+        )
         self._last_published_left_gripper: float | None = None
         self._last_published_right_gripper: float | None = None
 
@@ -113,10 +119,23 @@ class LatestTimedActionPlan:
             raise ValueError(f"Action timestamps must be strictly increasing: {action_times}")
 
         expired_actions = int(np.searchsorted(action_times, now, side="right"))
+        if expired_actions >= usable_len:
+            left = self._last_published_left_gripper
+            right = self._last_published_right_gripper
+            return PlanUpdate(
+                request_id=result.request_id,
+                accepted_actions=0,
+                expired_actions=expired_actions,
+                first_action_time=float(action_times[0]),
+                last_action_time=float(action_times[-1]),
+                voted_left_gripper=float(self._args.gripper_open_value if left is None else left),
+                voted_right_gripper=float(self._args.gripper_open_value if right is None else right),
+                blended_actions=0,
+            )
         # Include the left interpolation endpoint in the voting window, while
         # excluding older rows that can no longer affect any published action.
         vote_start = max(0, min(expired_actions - 1, usable_len - 1))
-        vote_end = min(usable_len, vote_start + GRIPPER_VOTE_ACTIONS)
+        vote_end = min(usable_len, vote_start + int(self._args.gripper_vote_actions))
         voted_left = self._vote_gripper(
             actions[vote_start:vote_end, 6],
             self._last_published_left_gripper,
@@ -133,7 +152,11 @@ class LatestTimedActionPlan:
         # the same absolute timestamps.  This removes replacement discontinuity
         # without building an action backlog or changing the model time axis.
         blend_len = 0
-        if self._actions is not None and self._action_times is not None:
+        if (
+            int(self._args.temporal_ensemble_chunks) <= 1
+            and self._actions is not None
+            and self._action_times is not None
+        ):
             blend_len = min(int(self._args.plan_blend_steps), usable_len)
             for index in range(blend_len):
                 old_action = self._sample_arrays(self._actions, self._action_times, float(action_times[index]))
@@ -148,6 +171,7 @@ class LatestTimedActionPlan:
         self._request_id = result.request_id
         self._actions = actions
         self._action_times = action_times.copy()
+        self._history.append((actions.copy(), action_times.copy()))
         return PlanUpdate(
             request_id=result.request_id,
             accepted_actions=usable_len,
@@ -175,6 +199,8 @@ class LatestTimedActionPlan:
                 alpha=0.0,
                 before_start=True,
                 after_end=False,
+                ensemble_chunks=1,
+                rejected_chunks=0,
             )
         if now >= times[-1]:
             last = len(times) - 1
@@ -187,6 +213,8 @@ class LatestTimedActionPlan:
                 alpha=1.0,
                 before_start=False,
                 after_end=True,
+                ensemble_chunks=1,
+                rejected_chunks=0,
             )
 
         right = int(np.searchsorted(times, now, side="right"))
@@ -194,9 +222,10 @@ class LatestTimedActionPlan:
         t0 = float(times[left])
         t1 = float(times[right])
         alpha = (now - t0) / (t1 - t0)
-        action = interp_linear(actions[left], actions[right], t0, t1, now)
+        action = np.asarray(interp_linear(actions[left], actions[right], t0, t1, now), dtype=np.float32)
+        action, ensemble_chunks, rejected_chunks = self._ensemble_joints_at_time(action, now)
         return InterpolatedAction(
-            action=np.asarray(action, dtype=np.float32),
+            action=action,
             left_index=left,
             right_index=right,
             left_time=t0,
@@ -204,12 +233,15 @@ class LatestTimedActionPlan:
             alpha=float(alpha),
             before_start=False,
             after_end=False,
+            ensemble_chunks=ensemble_chunks,
+            rejected_chunks=rejected_chunks,
         )
 
     def reset(self) -> None:
         self._request_id = None
         self._actions = None
         self._action_times = None
+        self._history.clear()
         self._last_published_left_gripper = None
         self._last_published_right_gripper = None
 
@@ -234,6 +266,44 @@ class LatestTimedActionPlan:
         if open_fraction <= 1.0 - minimum:
             return float(self._args.gripper_close_value)
         return float(previous)
+
+    def _ensemble_joints_at_time(
+        self,
+        latest_action: np.ndarray,
+        now: float,
+    ) -> tuple[np.ndarray, int, int]:
+        candidates = []
+        weights = []
+        decay = float(self._args.temporal_ensemble_decay)
+        max_disagreement = float(self._args.temporal_ensemble_max_disagreement)
+        newest_joints = None
+        rejected = 0
+        for age, (actions, times) in enumerate(reversed(self._history)):
+            # Do not extrapolate old chunks into the ensemble.  Only predictions
+            # that explicitly cover the current absolute time may contribute.
+            if now < times[0] or now > times[-1]:
+                continue
+            joints = self._sample_arrays(actions, times, now)[JOINT_INDICES]
+            if newest_joints is None:
+                newest_joints = joints
+            elif float(np.max(np.abs(joints - newest_joints))) > max_disagreement:
+                # A large disagreement usually marks a real phase transition.
+                # Trust the newest plan instead of averaging it back toward an
+                # obsolete grasp/contact/motion intent.
+                rejected += 1
+                continue
+            candidates.append(joints)
+            weights.append(float(np.exp(-decay * age)))
+
+        if len(candidates) <= 1:
+            return latest_action, max(1, len(candidates)), rejected
+        normalized = np.asarray(weights, dtype=np.float64)
+        normalized /= np.sum(normalized)
+        fused = np.sum(np.asarray(candidates, dtype=np.float32) * normalized[:, None], axis=0)
+        result = latest_action.copy()
+        result[JOINT_INDICES] = fused.astype(np.float32)
+        # Grippers intentionally remain the latest chunk's voted values.
+        return result, len(candidates), rejected
 
     @staticmethod
     def _sample_arrays(actions: np.ndarray, times: np.ndarray, now: float) -> np.ndarray:
@@ -263,6 +333,50 @@ class LatencyStats:
         if previous is None:
             return float(value)
         return self._alpha * float(value) + (1.0 - self._alpha) * previous
+
+
+class ExecutedJointFilter:
+    """Keep joint commands continuous relative to the last acknowledged command."""
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        self._args = args
+        self._previous_joints: np.ndarray | None = None
+        self.last_raw_jump = 0.0
+        self.last_sent_step = 0.0
+        self.last_was_clipped = False
+
+    def initialize(self, reference_joints: np.ndarray) -> None:
+        if self._previous_joints is None:
+            self._previous_joints = np.asarray(reference_joints, dtype=np.float32).reshape(12).copy()
+
+    def apply(self, action: np.ndarray) -> np.ndarray:
+        result = np.asarray(action, dtype=np.float32).reshape(base.ACTION_DIM).copy()
+        if self._previous_joints is None:
+            return result
+
+        target = result[JOINT_INDICES]
+        previous = self._previous_joints
+        self.last_raw_jump = float(np.max(np.abs(target - previous)))
+        alpha = float(self._args.joint_ema_alpha)
+        filtered = alpha * target + (1.0 - alpha) * previous
+        max_step = float(self._args.joint_max_step)
+        unclipped = filtered.copy()
+        if max_step > 0.0:
+            filtered = previous + np.clip(filtered - previous, -max_step, max_step)
+        self.last_was_clipped = bool(not np.allclose(filtered, unclipped))
+        self.last_sent_step = float(np.max(np.abs(filtered - previous)))
+        result[JOINT_INDICES] = filtered
+        return result
+
+    def mark_published(self, action: np.ndarray) -> None:
+        action = np.asarray(action, dtype=np.float32).reshape(base.ACTION_DIM)
+        self._previous_joints = action[JOINT_INDICES].copy()
+
+    def reset(self) -> None:
+        self._previous_joints = None
+        self.last_raw_jump = 0.0
+        self.last_sent_step = 0.0
+        self.last_was_clipped = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -373,6 +487,10 @@ def _fetch_inference_result(
     actions, model_latency = base._policy_actions(client, observation)  # noqa: SLF001
     finished_time = time.monotonic()
     action_times = observation_time + (np.arange(len(actions), dtype=np.float64) + 1.0) * MODEL_ACTION_DT
+    reference_joints = np.r_[
+        base._joint_pos(raw_state, "left"),  # noqa: SLF001
+        base._joint_pos(raw_state, "right"),  # noqa: SLF001
+    ].astype(np.float32)
     return InferenceResult(
         request_id=request_id,
         generation=generation,
@@ -382,6 +500,7 @@ def _fetch_inference_result(
         end_to_end_latency=finished_time - started,
         actions=actions,
         action_times=action_times,
+        reference_joints=reference_joints,
     )
 
 
@@ -434,6 +553,7 @@ def _run_async_loop(args: argparse.Namespace) -> None:
 
     client = websocket_client_policy.WebsocketClientPolicy(host=args.policy_host, port=args.policy_port)
     plan = LatestTimedActionPlan(args)
+    joint_filter = ExecutedJointFilter(args)
     latency_stats = LatencyStats(args.latency_ema_alpha)
     command_publisher = LatestCommandPublisher(args)
     soft_close_switch = base.RightSoftCloseControlPanel(
@@ -493,6 +613,7 @@ def _run_async_loop(args: argparse.Namespace) -> None:
                     completion.command.left_gripper,
                     completion.command.right_gripper,
                 )
+                joint_filter.mark_published(completion.command.action)
                 publish_count += 1
                 if publish_latency_ema is None:
                     publish_latency_ema = completion.latency
@@ -518,6 +639,7 @@ def _run_async_loop(args: argparse.Namespace) -> None:
                 if intervention.handled or intervention.released:
                     generation += 1
                     plan.reset()
+                    joint_filter.reset()
                     consecutive_holds = 0
                     global_tick = current_tick + 1
                     continue
@@ -534,6 +656,8 @@ def _run_async_loop(args: argparse.Namespace) -> None:
                     latency_stats.update(result)
                     update = plan.integrate(result, now=time.monotonic())
                     inference_count += 1
+                    if update.accepted_actions > 0:
+                        joint_filter.initialize(result.reference_joints)
                     if inference_count == 1 or inference_count % args.log_every_infers == 0:
                         print(
                             f"[async infer] n={inference_count} request={update.request_id} "
@@ -545,6 +669,12 @@ def _run_async_loop(args: argparse.Namespace) -> None:
                             f"gripper_vote=({update.voted_left_gripper:.1f},{update.voted_right_gripper:.1f}) "
                             f"blended={update.blended_actions} "
                             f"model_ema={latency_stats.model_ema * 1000:.1f}ms"
+                        )
+                    if update.accepted_actions == 0:
+                        print(
+                            f"[async expired] request={update.request_id} discarded entire chunk: "
+                            f"now={time.monotonic():.6f} last_t={update.last_action_time:.6f} "
+                            f"expired={update.expired_actions}"
                         )
 
             # Only one request may use the WebSocket client at a time.  Starting
@@ -578,7 +708,8 @@ def _run_async_loop(args: argparse.Namespace) -> None:
             else:
                 consecutive_holds = 0
 
-            command = _prepare_interpolated_command(args, sampled.action, seq)
+            filtered_action = joint_filter.apply(sampled.action)
+            command = _prepare_interpolated_command(args, filtered_action, seq)
             command_publisher.submit(command)
             if args.log_every_steps > 0 and seq % args.log_every_steps == 0:
                 print(
@@ -587,6 +718,10 @@ def _run_async_loop(args: argparse.Namespace) -> None:
                     f"times=({sampled.left_time:.6f},{sampled.right_time:.6f}) "
                     f"alpha={sampled.alpha:.4f} before={sampled.before_start} "
                     f"after={sampled.after_end} holds={consecutive_holds} "
+                    f"ensemble={sampled.ensemble_chunks} rejected={sampled.rejected_chunks} "
+                    f"raw_jump={joint_filter.last_raw_jump:.5f} "
+                    f"sent_step={joint_filter.last_sent_step:.5f} "
+                    f"clipped={joint_filter.last_was_clipped} "
                     f"publish_dropped={command_publisher.dropped_commands}"
                 )
             steps_done += 1
@@ -641,7 +776,11 @@ def _parse_args() -> argparse.Namespace:
     parser.set_defaults(smooth_grippers=True)
     parser.add_argument("--gripper-vote-threshold", type=float, default=50.0)
     parser.add_argument("--gripper-min-vote-fraction", type=float, default=0.6)
+    parser.add_argument("--gripper-vote-actions", type=int, default=5)
     parser.add_argument("--plan-blend-steps", type=int, default=3)
+    parser.add_argument("--temporal-ensemble-chunks", type=int, default=3)
+    parser.add_argument("--temporal-ensemble-decay", type=float, default=0.5)
+    parser.add_argument("--temporal-ensemble-max-disagreement", type=float, default=0.06)
     parser.add_argument("--max-hold-steps", type=int, default=4)
     parser.add_argument("--max-empty-infers", type=int, default=3)
     parser.add_argument("--latency-ema-alpha", type=float, default=0.2)
@@ -710,8 +849,16 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--gripper-vote-threshold must be in [0, 100]")
     if not 0.5 <= args.gripper_min_vote_fraction <= 1.0:
         parser.error("--gripper-min-vote-fraction must be in [0.5, 1.0]")
+    if args.gripper_vote_actions <= 0:
+        parser.error("--gripper-vote-actions must be positive")
     if args.plan_blend_steps < 0:
         parser.error("--plan-blend-steps must be non-negative")
+    if args.temporal_ensemble_chunks <= 0:
+        parser.error("--temporal-ensemble-chunks must be positive")
+    if args.temporal_ensemble_decay < 0.0:
+        parser.error("--temporal-ensemble-decay must be non-negative")
+    if args.temporal_ensemble_max_disagreement < 0.0:
+        parser.error("--temporal-ensemble-max-disagreement must be non-negative")
     if args.max_hold_steps < 0:
         parser.error("--max-hold-steps must be non-negative")
     if args.max_empty_infers < 0:

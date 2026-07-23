@@ -9,7 +9,7 @@
             "console": "integratedTerminal",
             "args": [
                 "--experiment",
-                "r1lite_pack_phone_abs_joint_crop_head_image_0707",
+                "r1lite_pack_phone_abs_joint_crop_head_image_dager",
 
                 "--action-space",
                 "abs_joint",
@@ -21,7 +21,22 @@
                 "50",
 
                 "--plan-blend-steps",
-                "2",
+                "0",
+
+                "--temporal-ensemble-chunks",
+                "3",
+
+                "--temporal-ensemble-decay",
+                "0.8",
+
+                "--temporal-ensemble-max-disagreement",
+                "0.06",
+
+                "--joint-ema-alpha",
+                "0.80",
+
+                "--joint-max-step",
+                "0.10",
 
                 "--max-hold-steps",
                 "4",
@@ -34,6 +49,9 @@
 
                 "--gripper-min-vote-fraction",
                 "0.6",
+
+                "--gripper-vote-actions",
+                "5",
 
                 "--right-soft-close-value",
                 "90",

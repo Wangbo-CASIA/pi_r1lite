@@ -1,0 +1,40 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run R1Lite Commit-Aware ACT Policy (Debug)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/r1lite/run_r1lite_openpi_policy_commit_act.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false,
+            "args": [
+                "--experiment", "r1lite_pack_phone_abs_joint_crop_head_image_dager",
+                "--policy-host", "localhost",
+                "--policy-port", "8000",
+                //"--robot-server", "http://127.0.0.1:8001",
+                "--control-hz", "15",
+                "--actions-per-infer", "15",
+                "--min-plan-commit-steps", "3",
+                "--act-max-candidates", "3",
+                "--act-weight-decay", "0.8",
+                "--joint-ema-alpha", "0.8",
+                "--joint-max-step", "0.10",
+                "--gripper-vote-threshold", "50",
+                "--gripper-min-vote-fraction", "0.6",
+                "--gripper-vote-actions", "5",
+                "--gripper-close-confirm-steps", "2",
+                "--gripper-open-confirm-steps", "3",
+                "--right-soft-close-value", "90",
+                "--max-hold-steps", "4",
+                "--latency-ema-alpha", "0.2",
+                "--log-every-infers", "10",
+                "--log-every-steps", "15",
+                "--timeout", "2.0",
+                "--execute",
+                "--max-steps", "2000"
+            ]
+        }
+    ]
+}

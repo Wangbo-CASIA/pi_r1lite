@@ -34,6 +34,13 @@ class _DictDataset:
         return self._length
 
 
+class _PythonIntOnlyDataset(_DictDataset):
+    def __getitem__(self, index):
+        if type(index) is not int:
+            raise TypeError(f"Expected a Python int index, got {type(index)}")
+        return super().__getitem__(index)
+
+
 def test_torch_data_loader():
     config = pi0_config.Pi0Config(action_dim=24, action_horizon=50, max_token_len=48)
     dataset = _data_loader.FakeDataset(config, 16)
@@ -113,7 +120,9 @@ def test_action_loss_mask_dataset_filters_intervention_starts(tmp_path):
     dataset = _data_loader.ActionLossMaskDataset(
         _DictDataset(11),
         action_horizon=4,
+        sample_mode="intervention",
         intervention_ranges_path=str(metadata_path),
+        fps=1.0,
     )
 
     assert len(dataset) == 5
@@ -130,6 +139,58 @@ def test_action_loss_mask_dataset_uses_full_mask_without_interventions():
     assert len(dataset) == 2
     assert dataset[1]["dataset_index"] == 1
     assert dataset[1]["action_loss_mask"].tolist() == [True, True, True, True]
+
+
+def test_action_loss_mask_dataset_keeps_valid_non_intervention_with_per_action_mask(tmp_path):
+    metadata_path = tmp_path / "episodes.jsonl"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "episode_index": 0,
+                "length": 12,
+                "intervention_ranges": [{"start_frame": 5, "end_frame": 7}],
+            }
+        )
+        + "\n"
+    )
+    dataset = _data_loader.ActionLossMaskDataset(
+        _PythonIntOnlyDataset(12),
+        action_horizon=7,
+        sample_mode="valid_non_intervention",
+        intervention_ranges_path=str(metadata_path),
+        fps=2.0,
+        pre_intervention_seconds=2.0,
+    )
+
+    # Frames 1..4 are the two-second pre-intervention window, while
+    # frames 5..7 belong to the intervention view.
+    assert [dataset[index]["dataset_index"] for index in range(len(dataset))] == [0, 8, 9, 10, 11]
+    # A chunk starting at frame 0 masks bad frames 1..4 and then resumes
+    # supervision on intervention frames 5..6.
+    assert dataset[0]["action_loss_mask"].tolist() == [True, False, False, False, False, True, True]
+    # Episode overflow is masked as well.
+    assert dataset[1]["action_loss_mask"].tolist() == [True, True, True, True, False, False, False]
+
+
+def test_dagger_config_uses_five_requested_source_weights():
+    config = _config.get_config("r1lite_pack_phone_abs_joint_crop_head_image_dager")
+    data_config = config.data.create(config.assets_dirs, config.model)
+
+    assert [source.weight for source in data_config.lerobot_datasets] == [0.40, 0.25, 0.05, 0.25, 0.05]
+    assert [source.sample_mode for source in data_config.lerobot_datasets] == [
+        "all",
+        "intervention",
+        "valid_non_intervention",
+        "intervention",
+        "valid_non_intervention",
+    ]
+    assert [source.action_sequence_keys for source in data_config.lerobot_datasets] == [
+        ("action.qpos",),
+        ("action",),
+        ("action",),
+        ("action.qpos",),
+        ("action.qpos",),
+    ]
 
 
 def test_r1lite_repack_preserves_action_loss_mask():

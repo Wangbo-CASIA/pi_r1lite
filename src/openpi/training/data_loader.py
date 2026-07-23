@@ -71,15 +71,32 @@ class ActionLossMaskDataset(Dataset[dict]):
         self,
         dataset: Dataset[dict],
         action_horizon: int,
+        *,
+        sample_mode: Literal["all", "intervention", "valid_non_intervention"] = "all",
         intervention_ranges_path: str | None = None,
+        fps: float | None = None,
+        pre_intervention_seconds: float = 2.0,
     ):
         self._dataset = dataset
         self._action_horizon = action_horizon
-        self._samples = self._load_intervention_samples(intervention_ranges_path)
+        self._sample_mode = sample_mode
+        self._valid_action_frames: list[np.ndarray] = []
+        self._samples = self._load_samples(intervention_ranges_path, fps, pre_intervention_seconds)
 
-    def _load_intervention_samples(self, intervention_ranges_path: str | None) -> list[tuple[int, int]] | None:
-        if intervention_ranges_path is None:
+    def _load_samples(
+        self,
+        intervention_ranges_path: str | None,
+        fps: float | None,
+        pre_intervention_seconds: float,
+    ) -> list[tuple[int, int, int, int | None]] | None:
+        if self._sample_mode == "all":
             return None
+        if intervention_ranges_path is None:
+            raise ValueError(f"sample_mode={self._sample_mode!r} requires intervention_ranges_path.")
+        if fps is None or fps <= 0:
+            raise ValueError(f"sample_mode={self._sample_mode!r} requires a positive dataset fps.")
+        if pre_intervention_seconds < 0:
+            raise ValueError("pre_intervention_seconds must be non-negative.")
 
         metadata_path = pathlib.Path(intervention_ranges_path)
         if not metadata_path.is_file():
@@ -89,8 +106,9 @@ class ActionLossMaskDataset(Dataset[dict]):
             episodes = [json.loads(line) for line in f if line.strip()]
         episodes.sort(key=lambda episode: episode["episode_index"])
 
-        samples: list[tuple[int, int]] = []
+        samples: list[tuple[int, int, int, int | None]] = []
         dataset_offset = 0
+        pre_intervention_frames = round(pre_intervention_seconds * fps)
         for expected_episode_index, episode in enumerate(episodes):
             episode_index = int(episode["episode_index"])
             if episode_index != expected_episode_index:
@@ -100,6 +118,8 @@ class ActionLossMaskDataset(Dataset[dict]):
                 )
 
             episode_length = int(episode["length"])
+            intervention_frames = np.zeros(episode_length, dtype=bool)
+            invalid_pre_intervention_frames = np.zeros(episode_length, dtype=bool)
             previous_end = -1
             for intervention_range in episode.get("intervention_ranges", ()):
                 start_frame = int(intervention_range["start_frame"])
@@ -112,11 +132,25 @@ class ActionLossMaskDataset(Dataset[dict]):
                 if start_frame <= previous_end:
                     raise ValueError(f"Overlapping intervention ranges in episode {episode_index} are not supported.")
 
-                samples.extend(
-                    (dataset_offset + frame_index, end_frame - frame_index + 1)
-                    for frame_index in range(start_frame, end_frame + 1)
-                )
+                intervention_frames[start_frame : end_frame + 1] = True
+                invalid_pre_intervention_frames[max(0, start_frame - pre_intervention_frames) : start_frame] = True
+                if self._sample_mode == "intervention":
+                    samples.extend(
+                        (dataset_offset + frame_index, episode_index, frame_index, end_frame)
+                        for frame_index in range(start_frame, end_frame + 1)
+                    )
                 previous_end = end_frame
+
+            # Intervention targets are corrections and always remain valid, even
+            # if a preceding-error window overlaps an earlier intervention.
+            invalid_pre_intervention_frames &= ~intervention_frames
+            self._valid_action_frames.append(~invalid_pre_intervention_frames)
+            if self._sample_mode == "valid_non_intervention":
+                valid_starts = ~intervention_frames & ~invalid_pre_intervention_frames
+                samples.extend(
+                    (dataset_offset + int(frame_index), episode_index, int(frame_index), None)
+                    for frame_index in np.flatnonzero(valid_starts)
+                )
 
             dataset_offset += episode_length
 
@@ -135,11 +169,22 @@ class ActionLossMaskDataset(Dataset[dict]):
             dataset_index = item_index
             valid_steps = self._action_horizon
         else:
-            dataset_index, remaining_intervention_steps = self._samples[item_index]
-            valid_steps = min(self._action_horizon, remaining_intervention_steps)
+            dataset_index, episode_index, frame_index, intervention_end = self._samples[item_index]
+            if self._sample_mode == "intervention":
+                assert intervention_end is not None
+                valid_steps = min(self._action_horizon, intervention_end - frame_index + 1)
+            else:
+                future_frames = frame_index + np.arange(self._action_horizon)
+                within_episode = future_frames < len(self._valid_action_frames[episode_index])
+                action_loss_mask = np.zeros(self._action_horizon, dtype=bool)
+                action_loss_mask[within_episode] = self._valid_action_frames[episode_index][
+                    future_frames[within_episode]
+                ]
 
         sample = dict(self._dataset[dataset_index])
-        sample["action_loss_mask"] = np.arange(self._action_horizon) < valid_steps
+        if self._samples is None or self._sample_mode == "intervention":
+            action_loss_mask = np.arange(self._action_horizon) < valid_steps
+        sample["action_loss_mask"] = action_loss_mask
         return sample
 
     def __len__(self) -> int:
@@ -248,24 +293,39 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
+    dataset_cache: dict[
+        tuple[str, str | None, tuple[str, ...]], tuple[Dataset, lerobot_dataset.LeRobotDatasetMetadata]
+    ] = {}
+
     def create_single_dataset(spec: _config.LeRobotDatasetConfig, *, add_action_loss_mask: bool) -> Dataset:
-        dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(spec.repo_id, root=spec.root)
-        dataset = lerobot_dataset.LeRobotDataset(
-            spec.repo_id,
-            root=spec.root,
-            delta_timestamps={
-                key: [t / dataset_meta.fps for t in range(action_horizon)] for key in spec.action_sequence_keys
-            },
-        )
+        cache_key = (spec.repo_id, spec.root, tuple(spec.action_sequence_keys))
+        if cache_key not in dataset_cache:
+            dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(spec.repo_id, root=spec.root)
+            dataset = lerobot_dataset.LeRobotDataset(
+                spec.repo_id,
+                root=spec.root,
+                delta_timestamps={
+                    key: [t / dataset_meta.fps for t in range(action_horizon)] for key in spec.action_sequence_keys
+                },
+            )
+            dataset_cache[cache_key] = (dataset, dataset_meta)
+        dataset, dataset_meta = dataset_cache[cache_key]
 
         if add_action_loss_mask:
-            dataset = ActionLossMaskDataset(dataset, action_horizon, spec.intervention_ranges_path)
+            dataset = ActionLossMaskDataset(
+                dataset,
+                action_horizon,
+                sample_mode=spec.sample_mode,
+                intervention_ranges_path=spec.intervention_ranges_path,
+                fps=dataset_meta.fps,
+                pre_intervention_seconds=spec.pre_intervention_seconds,
+            )
         if data_config.prompt_from_task:
             dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
         return dataset
 
     if data_config.lerobot_datasets:
-        add_action_loss_mask = any(spec.intervention_ranges_path is not None for spec in data_config.lerobot_datasets)
+        add_action_loss_mask = any(spec.sample_mode != "all" for spec in data_config.lerobot_datasets)
         datasets = [
             create_single_dataset(spec, add_action_loss_mask=add_action_loss_mask)
             for spec in data_config.lerobot_datasets
